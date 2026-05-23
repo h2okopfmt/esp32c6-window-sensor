@@ -72,7 +72,7 @@ const definition = {
             .withDescription('Taster 2 (GPIO1)'),
     ],
     fromZigbee: [{
-        cluster: 'manuSpecificAssaDoorLock',
+        cluster: '64512',  // raw cluster ID as string (z2m matches by string or number; older zigbee-herdsman maps 64512 to 'manuSpecificAssaDoorLock' so that name also works on those setups)
         type: ['attributeReport', 'readResponse'],
         convert: (model, msg) => {
             const result = {};
@@ -88,4 +88,8 @@ const definition = {
 module.exports = definition;
 ```
 
-**Hinweis:** Cluster `0xFC00` ist in zigbee-herdsman als `manuSpecificAssaDoorLock` registriert (Konflikt mit `manuSpecificPhilips`). Im Converter daher String-Name nutzen, keine Zahl.
+**Hinweis Cluster-Name:** Cluster `0xFC00` (64512) ist je nach zigbee-herdsman Version unterschiedlich gemappt:
+- Ältere Versionen registrieren es als `manuSpecificAssaDoorLock` → Converter mit String-Name funktioniert
+- Neuere Versionen kennen den Cluster nicht namentlich → Frame kommt als `'64512'` rein → Converter braucht `cluster: '64512'`
+
+Bei `"No converter available for 'esp32c6' with cluster '...'"` im z2m-Log den Cluster-Wert aus der Meldung in den Converter übernehmen.

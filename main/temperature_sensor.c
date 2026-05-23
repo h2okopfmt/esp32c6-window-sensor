@@ -165,17 +165,42 @@ static esp_err_t deferred_driver_init(void)
     int lvl2 = gpio_get_level(GPIO_T2);
     bool cold = (s_last_t1 < 0 || s_last_t2 < 0);
 
-    if (cold || lvl1 != s_last_t1) {
+    /* EXT1 wake: figure out which pin triggered so we can synthesize a momentary
+     * press event even if the button was released before we finished booting. */
+    uint64_t ext1_mask = esp_sleep_get_ext1_wakeup_status();
+    bool wake_t1 = ext1_mask & BIT64(GPIO_T1);
+    bool wake_t2 = ext1_mask & BIT64(GPIO_T2);
+    ESP_LOGI(TAG, "Wake mask: T1=%d T2=%d  current T1=%d T2=%d  last T1=%d T2=%d  cold=%d",
+             wake_t1, wake_t2, lvl1, lvl2, s_last_t1, s_last_t2, cold);
+
+    /* Per-button: report the edge that woke us (press OR release), then current level. */
+    if (wake_t1 && !cold) {
+        /* if last was HIGH (1), wake-on-LOW = press; if last was LOW (0), wake-on-HIGH = release */
+        bool pressed_edge = (s_last_t1 == 1);
+        update_and_report(WIN_ATTR_T1, pressed_edge);
+        s_state_changed = true;
+        if (lvl1 != (pressed_edge ? 0 : 1)) {
+            update_and_report(WIN_ATTR_T1, lvl1 == 0);  /* current state if differs from edge */
+        }
+    } else if (cold || lvl1 != s_last_t1) {
         update_and_report(WIN_ATTR_T1, lvl1 == 0);
         s_state_changed = true;
     }
-    if (cold || lvl2 != s_last_t2) {
+
+    if (wake_t2 && !cold) {
+        bool pressed_edge = (s_last_t2 == 1);
+        update_and_report(WIN_ATTR_T2, pressed_edge);
+        s_state_changed = true;
+        if (lvl2 != (pressed_edge ? 0 : 1)) {
+            update_and_report(WIN_ATTR_T2, lvl2 == 0);
+        }
+    } else if (cold || lvl2 != s_last_t2) {
         update_and_report(WIN_ATTR_T2, lvl2 == 0);
         s_state_changed = true;
     }
+
     s_last_t1 = lvl1;
     s_last_t2 = lvl2;
-    ESP_LOGI(TAG, "State T1=%d T2=%d (cold=%d, changed=%d)", lvl1, lvl2, cold, s_state_changed);
 
     inited = true;
     return ESP_OK;
