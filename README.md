@@ -1,42 +1,40 @@
 # ESP32-C6 Window/Door Contact Sensor (Zigbee)
 
-XIAO ESP32-C6 als Zigbee End-Device mit 2 Reed-Kontakten für Fenster/Tür-Überwachung. Sendet Custom-Cluster Attribute Reports an Zigbee2MQTT.
+XIAO ESP32-C6 als Zigbee End-Device mit 2 Micro-Tastern für 3-Zustand-Fensterüberwachung (offen / gekippt / geschlossen). Sendet Custom-Cluster Attribute Reports an Zigbee2MQTT.
 
 ## Hardware
 
 - **Board:** Seeed XIAO ESP32-C6
-- **Reed 1:** D2 (= GPIO2) gegen GND
-- **Reed 2:** D1 (= GPIO1) gegen GND
-- Interner Pullup aktiv, active-low (geschlossener Reed = `true`)
+- **Taster 1:** Micro-Taster, D2 (= GPIO2) gegen GND
+- **Taster 2:** Micro-Taster, D1 (= GPIO1) gegen GND
+- Interner Pullup aktiv, active-low (gedrückter Taster = `true`)
 - **Stromversorgung:** 2× AAA (~3 V), Battery-Setup mit Deep Sleep
 
-> Beide Reed-Pins müssen RTC-fähig sein (GPIO 0–7 auf C6) — sonst kein EXT1 Wake im Deep Sleep.
+> Beide Taster-Pins müssen RTC-fähig sein (GPIO 0–7 auf C6) — sonst kein EXT1 Wake im Deep Sleep.
 
 ## 3-Zustand-Erkennung: offen / gekippt / geschlossen
 
-Mit zwei Reed-Kontakten + zwei Magneten lässt sich der Fensterstatus eindeutig
-unterscheiden. **Verdeckter Einbau ins Fensterprofil — Reeds und Magnete sind
-nach dem Einbau unsichtbar** (am festen Rahmen die Reeds eingelassen, am
-beweglichen Flügel die Magneten eingelassen; ESP + Batterie in der Falz oder
-verdeckt im Rahmen):
+Mit zwei Micro-Tastern lässt sich der Fensterstatus eindeutig unterscheiden.
+**Verdeckter Einbau ins Fensterprofil — die Taster sind nach dem Einbau
+unsichtbar** (Taster im festen Rahmen eingelassen, Stößel werden vom Flügel
+mechanisch gedrückt; ESP + Batterie in der Falz oder verdeckt im Rahmen):
 
 ```
-Reed 1 (D2/GPIO2) — Position: oben am Rahmen
-                    Magnet:   am Flügel oben — nur ausgerichtet wenn Flügel ZU
-Reed 2 (D1/GPIO1) — Position: an der Bandseite (Drehachse), unten am Rahmen
-                    Magnet:   am Flügel an der Drehachse — bleibt sowohl bei
-                              "zu" als auch bei "gekippt" in Reed-Nähe (kippt
-                              nur die Oberseite weg, die Drehachse bleibt)
+Taster 1 (D2/GPIO2) — Position: oben am Rahmen
+                      Druck:    nur wenn Flügel ZU (Oberseite drückt Stößel)
+Taster 2 (D1/GPIO1) — Position: an der Bandseite (Drehachse), unten am Rahmen
+                      Druck:    sowohl bei "zu" als auch bei "gekippt"
+                                (nur die Oberseite klappt weg, die Drehachse bleibt)
 ```
 
-**Truth Table** (`true` = Magnet am Reed = Kontakt geschlossen):
+**Truth Table** (`true` = Taster gedrückt):
 
 | `taster_1` (oben) | `taster_2` (Bandseite) | Fensterstatus |
 |---|---|---|
 | `true`  | `true`  | **geschlossen** |
 | `false` | `true`  | **gekippt** |
 | `false` | `false` | **offen** |
-| `true`  | `false` | (sollte nicht vorkommen — Magnet/Reed-Justierung prüfen) |
+| `true`  | `false` | (sollte nicht vorkommen — Mechanik prüfen) |
 
 Die Auswertung der drei Zustände passiert in der Smarthome-Logik (z.B. ioBroker
 Script oder z2m → HA Template Sensor), nicht im ESP-Firmware.
