@@ -1,0 +1,10 @@
+build/
+managed_components/
+dependencies.lock
+sdkconfig
+sdkconfig.old
+.vscode/
+.idea/
+*.elf
+*.bin
+*.map
