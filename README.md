@@ -19,22 +19,24 @@ Mit zwei Micro-Tastern lässt sich der Fensterstatus eindeutig unterscheiden.
 unsichtbar** (Taster im festen Rahmen eingelassen, Stößel werden vom Flügel
 mechanisch gedrückt; ESP + Batterie in der Falz oder verdeckt im Rahmen):
 
+Jeder Taster wird durch die Mechanik in genau EINER Flügelstellung gedrückt
+(die beiden Stellungen schließen sich gegenseitig aus — beide gleichzeitig
+gedrückt kann nicht vorkommen):
+
 ```
-Taster 1 (D2/GPIO2) — Position: oben am Rahmen
-                      Druck:    nur wenn Flügel ZU (Oberseite drückt Stößel)
-Taster 2 (D1/GPIO1) — Position: an der Bandseite (Drehachse), unten am Rahmen
-                      Druck:    sowohl bei "zu" als auch bei "gekippt"
-                                (nur die Oberseite klappt weg, die Drehachse bleibt)
+Taster 1 (D2/GPIO2) — gedrückt wenn Flügel GESCHLOSSEN
+Taster 2 (D1/GPIO1) — gedrückt wenn Flügel GEKIPPT
+beide los              — Flügel OFFEN (Drehgriff in Offen-Stellung)
 ```
 
 **Truth Table** (`true` = Taster gedrückt):
 
-| `taster_1` (oben) | `taster_2` (Bandseite) | Fensterstatus |
+| `taster_1` | `taster_2` | Fensterstatus |
 |---|---|---|
-| `true`  | `true`  | **geschlossen** |
+| `true`  | `false` | **geschlossen** |
 | `false` | `true`  | **gekippt** |
 | `false` | `false` | **offen** |
-| `true`  | `false` | (sollte nicht vorkommen — Mechanik prüfen) |
+| `true`  | `true`  | (unmöglich — kommt mechanisch nicht vor) |
 
 Die Auswertung der drei Zustände passiert in der Smarthome-Logik (z.B. ioBroker
 Script oder z2m → HA Template Sensor), nicht im ESP-Firmware.
