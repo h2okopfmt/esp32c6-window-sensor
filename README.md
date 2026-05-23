@@ -12,6 +12,35 @@ XIAO ESP32-C6 als Zigbee End-Device mit 2 Reed-Kontakten für Fenster/Tür-Über
 
 > Beide Reed-Pins müssen RTC-fähig sein (GPIO 0–7 auf C6) — sonst kein EXT1 Wake im Deep Sleep.
 
+## 3-Zustand-Erkennung: offen / gekippt / geschlossen
+
+Mit zwei Reed-Kontakten + zwei Magneten lässt sich der Fensterstatus eindeutig
+unterscheiden. **Verdeckter Einbau ins Fensterprofil — Reeds und Magnete sind
+nach dem Einbau unsichtbar** (am festen Rahmen die Reeds eingelassen, am
+beweglichen Flügel die Magneten eingelassen; ESP + Batterie in der Falz oder
+verdeckt im Rahmen):
+
+```
+Reed 1 (D2/GPIO2) — Position: oben am Rahmen
+                    Magnet:   am Flügel oben — nur ausgerichtet wenn Flügel ZU
+Reed 2 (D1/GPIO1) — Position: an der Bandseite (Drehachse), unten am Rahmen
+                    Magnet:   am Flügel an der Drehachse — bleibt sowohl bei
+                              "zu" als auch bei "gekippt" in Reed-Nähe (kippt
+                              nur die Oberseite weg, die Drehachse bleibt)
+```
+
+**Truth Table** (`true` = Magnet am Reed = Kontakt geschlossen):
+
+| `taster_1` (oben) | `taster_2` (Bandseite) | Fensterstatus |
+|---|---|---|
+| `true`  | `true`  | **geschlossen** |
+| `false` | `true`  | **gekippt** |
+| `false` | `false` | **offen** |
+| `true`  | `false` | (sollte nicht vorkommen — Magnet/Reed-Justierung prüfen) |
+
+Die Auswertung der drei Zustände passiert in der Smarthome-Logik (z.B. ioBroker
+Script oder z2m → HA Template Sensor), nicht im ESP-Firmware.
+
 ## Zigbee
 
 - End-Device, joint via NETWORK_STEERING zu vorhandenem Netz
