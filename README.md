@@ -14,6 +14,9 @@ XIAO ESP32-C6 als Zigbee End-Device mit 2 Micro-Tastern für 3-Zustand-Fensterü
 
 ## 3-Zustand-Erkennung: offen / gekippt / geschlossen
 
+> 📸 **Bilder folgen** (Einbau im Fensterprofil, Taster-Positionen, fertiger Sensor)
+
+
 Mit zwei Micro-Tastern lässt sich der Fensterstatus eindeutig unterscheiden.
 **Verdeckter Einbau ins Fensterprofil — die Taster sind nach dem Einbau
 unsichtbar** (Taster im festen Rahmen eingelassen, Stößel werden vom Flügel
