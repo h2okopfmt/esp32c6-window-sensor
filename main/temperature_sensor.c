@@ -1,19 +1,30 @@
 /*
- * ESP32-C6 XIAO Window/Door Contact Sensor
- * 2 Reed-Inputs on GPIO2 (D2) + GPIO18 (D10)
- * Custom Cluster 0xFC00, boolean attrs id 0+1, READ + REPORTING
- * Compatible with esp32c6_converter.js (zigbee2mqtt external converter)
+ * ESP32-C6 XIAO Window/Door Contact Sensor (battery, deep sleep)
+ * Reeds: GPIO2 (D2) + GPIO1 (D1) — both RTC GPIOs (required for EXT1 wake)
+ * Custom Cluster 0xFC00, BOOL attrs 0/1, READ+REPORTING
+ *
+ * Behavior:
+ *   - Cold boot or wake -> Zigbee init -> join or resume.
+ *   - On join/reboot success: deferred_driver_init -> read GPIOs -> report both attrs.
+ *   - GPIO ISR -> debounce -> report on change. Each event resets idle timer.
+ *   - Idle timer (default 5 s after last activity) -> deep sleep.
+ *   - First-join: longer idle (60 s) so z2m interview can complete.
+ *   - Wake on EXT1 (any edge on either reed, per-pin level) OR 1h fallback timer.
  */
 
 #include "esp_check.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_sleep.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
+#include "sys/time.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
+#include "driver/rtc_io.h"
 
 #include "alarm_timer.h"
 
@@ -24,14 +35,25 @@
 
 static const char *TAG = "WINDOW_SENSOR";
 
-#define WIN_SENSOR_EP_ID    10
-#define WIN_SENSOR_CLUSTER  0xFC00
-#define WIN_ATTR_T1         0x0000
-#define WIN_ATTR_T2         0x0001
-#define GPIO_T1             GPIO_NUM_2
-#define GPIO_T2             GPIO_NUM_18
+#define WIN_SENSOR_EP_ID         10
+#define WIN_SENSOR_CLUSTER       0xFC00
+#define WIN_ATTR_T1              0x0000
+#define WIN_ATTR_T2              0x0001
+#define GPIO_T1                  GPIO_NUM_2   /* D2 */
+#define GPIO_T2                  GPIO_NUM_1   /* D1 (umgelötet von D10) */
 
-static QueueHandle_t gpio_evt_queue = NULL;
+#define IDLE_SLEEP_MS            5000              /* idle wait after real event */
+#define IDLE_SLEEP_SPURIOUS_MS   500               /* short wait if wake had no state change */
+#define IDLE_SLEEP_JOIN_MS       60000             /* longer after fresh steering (z2m interview) */
+#define DEEP_SLEEP_FALLBACK_SEC  3600              /* periodic keep-alive wake (1h) */
+
+static QueueHandle_t          gpio_evt_queue   = NULL;
+static esp_timer_handle_t     s_sleep_timer    = NULL;
+static RTC_DATA_ATTR uint32_t s_boot_count     = 0;
+static RTC_DATA_ATTR struct timeval s_sleep_time = {0};
+static RTC_DATA_ATTR int      s_last_t1        = -1;   /* -1 = uninitialized (cold boot) */
+static RTC_DATA_ATTR int      s_last_t2        = -1;
+static bool                   s_state_changed  = false; /* set during this wake cycle */
 
 static void IRAM_ATTR gpio_isr_handler(void *arg)
 {
@@ -47,18 +69,53 @@ static void update_and_report(uint16_t attr_id, bool value)
                            attr_id, EZB_ZCL_STD_MANUF_CODE, &v, false);
     ezb_zcl_report_attr_cmd_t cmd = {
         .cmd_ctrl = {
-            .fc.direction         = EZB_ZCL_CMD_DIRECTION_TO_CLI,
-            .dst_addr.addr_mode   = EZB_ADDR_MODE_SHORT,
-            .dst_addr.u.short_addr= 0x0000,
-            .dst_ep               = 1,
-            .src_ep               = WIN_SENSOR_EP_ID,
-            .cluster_id           = WIN_SENSOR_CLUSTER,
+            .fc.direction          = EZB_ZCL_CMD_DIRECTION_TO_CLI,
+            .dst_addr.addr_mode    = EZB_ADDR_MODE_SHORT,
+            .dst_addr.u.short_addr = 0x0000,
+            .dst_ep                = 1,
+            .src_ep                = WIN_SENSOR_EP_ID,
+            .cluster_id            = WIN_SENSOR_CLUSTER,
         },
         .payload = { .attr_id = attr_id },
     };
     ezb_err_t ret = ezb_zcl_report_attr_cmd_req(&cmd);
     esp_zigbee_lock_release();
     ESP_LOGI(TAG, "Report attr 0x%04x = %d (ret=0x%04x)", attr_id, v, ret);
+}
+
+static void enter_deep_sleep(void *arg)
+{
+    int lvl1 = gpio_get_level(GPIO_T1);
+    int lvl2 = gpio_get_level(GPIO_T2);
+
+    /* per-pin EXT1 wake: opposite of current pegel so we catch any edge */
+    uint64_t mask_low  = 0;
+    uint64_t mask_high = 0;
+    if (lvl1) mask_low  |= BIT64(GPIO_T1); else mask_high |= BIT64(GPIO_T1);
+    if (lvl2) mask_low  |= BIT64(GPIO_T2); else mask_high |= BIT64(GPIO_T2);
+
+    if (mask_low)  esp_sleep_enable_ext1_wakeup_io(mask_low,  ESP_EXT1_WAKEUP_ANY_LOW);
+    if (mask_high) esp_sleep_enable_ext1_wakeup_io(mask_high, ESP_EXT1_WAKEUP_ANY_HIGH);
+
+    rtc_gpio_pulldown_dis(GPIO_T1); rtc_gpio_pullup_en(GPIO_T1);
+    rtc_gpio_pulldown_dis(GPIO_T2); rtc_gpio_pullup_en(GPIO_T2);
+
+    esp_sleep_enable_timer_wakeup((uint64_t)DEEP_SLEEP_FALLBACK_SEC * 1000000ULL);
+
+    gettimeofday(&s_sleep_time, NULL);
+    ESP_LOGI(TAG, "Deep sleep (T1=%d T2=%d, fallback %ds)", lvl1, lvl2, DEEP_SLEEP_FALLBACK_SEC);
+    esp_deep_sleep_start();
+}
+
+static void schedule_deep_sleep(uint32_t grace_ms)
+{
+    if (!s_sleep_timer) {
+        const esp_timer_create_args_t args = { .callback = enter_deep_sleep, .name = "ds_timer" };
+        esp_timer_create(&args, &s_sleep_timer);
+    }
+    esp_timer_stop(s_sleep_timer);
+    esp_timer_start_once(s_sleep_timer, (uint64_t)grace_ms * 1000ULL);
+    ESP_LOGI(TAG, "Sleep scheduled in %lu ms", (unsigned long)grace_ms);
 }
 
 static void gpio_task(void *arg)
@@ -68,12 +125,17 @@ static void gpio_task(void *arg)
         if (xQueueReceive(gpio_evt_queue, &io_num, portMAX_DELAY)) {
             vTaskDelay(pdMS_TO_TICKS(30));  /* debounce */
             int lvl = gpio_get_level(io_num);
-            bool pressed = (lvl == 0);  /* active-low: pullup, reed to GND -> closed = pressed */
-            if (io_num == GPIO_T1) {
+            bool pressed = (lvl == 0);
+            if (io_num == GPIO_T1 && lvl != s_last_t1) {
                 update_and_report(WIN_ATTR_T1, pressed);
-            } else if (io_num == GPIO_T2) {
+                s_last_t1 = lvl;
+                s_state_changed = true;
+            } else if (io_num == GPIO_T2 && lvl != s_last_t2) {
                 update_and_report(WIN_ATTR_T2, pressed);
+                s_last_t2 = lvl;
+                s_state_changed = true;
             }
+            schedule_deep_sleep(IDLE_SLEEP_MS);  /* reset idle timer */
         }
     }
 }
@@ -99,9 +161,21 @@ static esp_err_t deferred_driver_init(void)
     ESP_ERROR_CHECK(gpio_isr_handler_add(GPIO_T1, gpio_isr_handler, (void *)GPIO_T1));
     ESP_ERROR_CHECK(gpio_isr_handler_add(GPIO_T2, gpio_isr_handler, (void *)GPIO_T2));
 
-    /* push initial state */
-    update_and_report(WIN_ATTR_T1, gpio_get_level(GPIO_T1) == 0);
-    update_and_report(WIN_ATTR_T2, gpio_get_level(GPIO_T2) == 0);
+    int lvl1 = gpio_get_level(GPIO_T1);
+    int lvl2 = gpio_get_level(GPIO_T2);
+    bool cold = (s_last_t1 < 0 || s_last_t2 < 0);
+
+    if (cold || lvl1 != s_last_t1) {
+        update_and_report(WIN_ATTR_T1, lvl1 == 0);
+        s_state_changed = true;
+    }
+    if (cold || lvl2 != s_last_t2) {
+        update_and_report(WIN_ATTR_T2, lvl2 == 0);
+        s_state_changed = true;
+    }
+    s_last_t1 = lvl1;
+    s_last_t2 = lvl2;
+    ESP_LOGI(TAG, "State T1=%d T2=%d (cold=%d, changed=%d)", lvl1, lvl2, cold, s_state_changed);
 
     inited = true;
     return ESP_OK;
@@ -127,12 +201,14 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
     case EZB_BDB_SIGNAL_DEVICE_REBOOT: {
         ezb_bdb_comm_status_t status = *((ezb_bdb_comm_status_t *)ezb_app_signal_get_params(app_signal));
         if (status == EZB_BDB_STATUS_SUCCESS) {
-            ESP_LOGI(TAG, "Deferred driver init %s", deferred_driver_init() ? "failed" : "ok");
             ESP_LOGI(TAG, "Device started up in%s factory-reset mode", ezb_bdb_is_factory_new() ? "" : " non");
             if (ezb_bdb_is_factory_new()) {
                 ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_NETWORK_STEERING);
             } else {
-                ESP_LOGI(TAG, "Device reboot");
+                ESP_LOGI(TAG, "Device reboot - resume in joined network");
+                ESP_ERROR_CHECK(deferred_driver_init());
+                /* short grace if nothing changed (likely spurious wake), longer if real event */
+                schedule_deep_sleep(s_state_changed ? IDLE_SLEEP_MS : IDLE_SLEEP_SPURIOUS_MS);
             }
         } else {
             ESP_LOGW(TAG, "%s failed with status(0x%02x), retry", ezb_app_signal_to_string(signal_type), status);
@@ -144,8 +220,10 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
         if (status == EZB_BDB_STATUS_SUCCESS) {
             ezb_extpanid_t ext_pan;
             ezb_nwk_get_extended_panid(&ext_pan);
-            ESP_LOGI(TAG, "Joined network: PAN ID(0x%04hx), EXT(0x%llx), Channel(%d), Short(0x%04hx)",
-                     ezb_nwk_get_panid(), ext_pan.u64, ezb_nwk_get_current_channel(), ezb_nwk_get_short_address());
+            ESP_LOGI(TAG, "Joined: PAN(0x%04hx) Ch(%d) Short(0x%04hx)",
+                     ezb_nwk_get_panid(), ezb_nwk_get_current_channel(), ezb_nwk_get_short_address());
+            ESP_ERROR_CHECK(deferred_driver_init());
+            schedule_deep_sleep(IDLE_SLEEP_JOIN_MS);
         } else {
             ESP_LOGW(TAG, "Steering failed (0x%02x), retry", status);
             alarm_timer_schedule(esp_zigbee_alarm_bdb_commissioning, EZB_BDB_MODE_NETWORK_STEERING, 1000);
@@ -190,7 +268,7 @@ esp_err_t esp_zigbee_create_window_sensor_device(void)
     ezb_af_ep_config_t ep_config = {
         .ep_id              = WIN_SENSOR_EP_ID,
         .app_profile_id     = EZB_AF_HA_PROFILE_ID,
-        .app_device_id      = 0x0000,  /* On/Off Switch */
+        .app_device_id      = 0x0000,
         .app_device_version = 0,
     };
     ezb_af_ep_desc_t ep_desc = ezb_af_create_endpoint_desc(&ep_config);
@@ -211,6 +289,20 @@ esp_err_t esp_zigbee_setup_commissioning(void)
     return ESP_OK;
 }
 
+static void log_wakeup_cause(void)
+{
+    esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+    struct timeval now;
+    gettimeofday(&now, NULL);
+    int slept_ms = (int)((now.tv_sec - s_sleep_time.tv_sec) * 1000 +
+                         (now.tv_usec - s_sleep_time.tv_usec) / 1000);
+    switch (cause) {
+    case ESP_SLEEP_WAKEUP_EXT1:  ESP_LOGI(TAG, "Wake: GPIO (slept %d ms)", slept_ms); break;
+    case ESP_SLEEP_WAKEUP_TIMER: ESP_LOGI(TAG, "Wake: TIMER (slept %d ms)", slept_ms); break;
+    default:                     ESP_LOGI(TAG, "Wake: POR/RESET (cause %d)", cause); break;
+    }
+}
+
 static void esp_zigbee_stack_main_task(void *pvParameters)
 {
     esp_zigbee_config_t config = ESP_ZIGBEE_DEFAULT_CONFIG();
@@ -225,8 +317,10 @@ static void esp_zigbee_stack_main_task(void *pvParameters)
 
 void app_main(void)
 {
+    s_boot_count++;
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(nvs_flash_init_partition(ESP_ZIGBEE_STORAGE_PARTITION_NAME));
-    ESP_LOGI(TAG, "Start ESP Zigbee Stack (Window Sensor)");
+    log_wakeup_cause();
+    ESP_LOGI(TAG, "Start ESP Zigbee Stack (Window Sensor, boot #%lu)", (unsigned long)s_boot_count);
     xTaskCreate(esp_zigbee_stack_main_task, "Zigbee_main", 4096, NULL, 5, NULL);
 }

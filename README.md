@@ -6,8 +6,11 @@ XIAO ESP32-C6 als Zigbee End-Device mit 2 Reed-Kontakten für Fenster/Tür-Über
 
 - **Board:** Seeed XIAO ESP32-C6
 - **Reed 1:** D2 (= GPIO2) gegen GND
-- **Reed 2:** D10 (= GPIO18) gegen GND
+- **Reed 2:** D1 (= GPIO1) gegen GND
 - Interner Pullup aktiv, active-low (geschlossener Reed = `true`)
+- **Stromversorgung:** 2× AAA (~3 V), Battery-Setup mit Deep Sleep
+
+> Beide Reed-Pins müssen RTC-fähig sein (GPIO 0–7 auf C6) — sonst kein EXT1 Wake im Deep Sleep.
 
 ## Zigbee
 
@@ -15,8 +18,17 @@ XIAO ESP32-C6 als Zigbee End-Device mit 2 Reed-Kontakten für Fenster/Tür-Über
 - Manufacturer: `ESPRESSIF`, Model: `esp32c6`
 - Endpoint 10, Basic Cluster + Custom Cluster `0xFC00`
   - Attribute 0x0000 (BOOL) = `taster_1` (D2)
-  - Attribute 0x0001 (BOOL) = `taster_2` (D10)
+  - Attribute 0x0001 (BOOL) = `taster_2` (D1)
 - Reports an Coordinator (`0x0000`, EP 1) bei GPIO-Änderung
+- `ed_timeout` 256 min, `keep_alive` 10000 (sleepy end device)
+
+## Deep Sleep
+
+- Nach jedem Event 5 s Idle → `esp_deep_sleep_start()`
+- Wake: EXT1 auf D2/D1 (per-pin level, beide Edges) ODER 1 h Timer-Fallback
+- Letzte Pin-States in `RTC_DATA_ATTR` — spurious wakes (Floating-Noise) erkennen → kein Report, 500 ms Mini-Grace, sofort wieder Sleep
+- Erster Join (nach Factory-Reset) hat 60 s Idle damit z2m Interview komplett wird
+- Sleep-Strom typisch ~7 µA, Wake+Report ~2 s @ ~40 mA
 
 ## Build & Flash
 
@@ -57,7 +69,7 @@ const definition = {
         e.binary('taster_1', access.STATE, true, false)
             .withDescription('Taster 1 (GPIO2)'),
         e.binary('taster_2', access.STATE, true, false)
-            .withDescription('Taster 2 (GPIO18)'),
+            .withDescription('Taster 2 (GPIO1)'),
     ],
     fromZigbee: [{
         cluster: 'manuSpecificAssaDoorLock',
