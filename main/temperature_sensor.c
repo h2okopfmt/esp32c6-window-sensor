@@ -42,7 +42,7 @@ static const char *TAG = "WINDOW_SENSOR";
 #define GPIO_T1                  GPIO_NUM_2   /* D2 */
 #define GPIO_T2                  GPIO_NUM_1   /* D1 (umgelötet von D10) */
 
-#define DEEP_SLEEP_ENABLED       0                 /* 0 = stay awake (USB/dev), 1 = enable deep sleep */
+#define DEEP_SLEEP_ENABLED       1                 /* 0 = stay awake (USB/dev), 1 = enable deep sleep */
 #define IDLE_SLEEP_MS            5000              /* idle wait after real event */
 #define IDLE_SLEEP_SPURIOUS_MS   500               /* short wait if wake had no state change */
 #define IDLE_SLEEP_JOIN_MS       60000             /* longer after fresh steering (z2m interview) */
