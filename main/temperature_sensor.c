@@ -42,6 +42,7 @@ static const char *TAG = "WINDOW_SENSOR";
 #define GPIO_T1                  GPIO_NUM_2   /* D2 */
 #define GPIO_T2                  GPIO_NUM_1   /* D1 (umgelötet von D10) */
 
+#define DEEP_SLEEP_ENABLED       0                 /* 0 = stay awake (USB/dev), 1 = enable deep sleep */
 #define IDLE_SLEEP_MS            5000              /* idle wait after real event */
 #define IDLE_SLEEP_SPURIOUS_MS   500               /* short wait if wake had no state change */
 #define IDLE_SLEEP_JOIN_MS       60000             /* longer after fresh steering (z2m interview) */
@@ -54,6 +55,7 @@ static RTC_DATA_ATTR struct timeval s_sleep_time = {0};
 static RTC_DATA_ATTR int      s_last_t1        = -1;   /* -1 = uninitialized (cold boot) */
 static RTC_DATA_ATTR int      s_last_t2        = -1;
 static bool                   s_state_changed  = false; /* set during this wake cycle */
+static esp_sleep_wakeup_cause_t s_wake_cause   = ESP_SLEEP_WAKEUP_UNDEFINED;
 
 static void IRAM_ATTR gpio_isr_handler(void *arg)
 {
@@ -109,6 +111,7 @@ static void enter_deep_sleep(void *arg)
 
 static void schedule_deep_sleep(uint32_t grace_ms)
 {
+#if DEEP_SLEEP_ENABLED
     if (!s_sleep_timer) {
         const esp_timer_create_args_t args = { .callback = enter_deep_sleep, .name = "ds_timer" };
         esp_timer_create(&args, &s_sleep_timer);
@@ -116,6 +119,10 @@ static void schedule_deep_sleep(uint32_t grace_ms)
     esp_timer_stop(s_sleep_timer);
     esp_timer_start_once(s_sleep_timer, (uint64_t)grace_ms * 1000ULL);
     ESP_LOGI(TAG, "Sleep scheduled in %lu ms", (unsigned long)grace_ms);
+#else
+    (void)grace_ms;
+    ESP_LOGI(TAG, "Sleep disabled (DEEP_SLEEP_ENABLED=0) — staying awake");
+#endif
 }
 
 static void gpio_task(void *arg)
@@ -165,13 +172,15 @@ static esp_err_t deferred_driver_init(void)
     int lvl2 = gpio_get_level(GPIO_T2);
     bool cold = (s_last_t1 < 0 || s_last_t2 < 0);
 
-    /* EXT1 wake: figure out which pin triggered so we can synthesize a momentary
-     * press event even if the button was released before we finished booting. */
-    uint64_t ext1_mask = esp_sleep_get_ext1_wakeup_status();
+    /* Edge synthesis only for genuine EXT1 wakes. After POR/timer wake the
+     * EXT1 status register may still hold stale bits which would otherwise
+     * make us spam fake press/release pairs every reboot. */
+    bool is_ext1_wake = (s_wake_cause == ESP_SLEEP_WAKEUP_EXT1);
+    uint64_t ext1_mask = is_ext1_wake ? esp_sleep_get_ext1_wakeup_status() : 0;
     bool wake_t1 = ext1_mask & BIT64(GPIO_T1);
     bool wake_t2 = ext1_mask & BIT64(GPIO_T2);
-    ESP_LOGI(TAG, "Wake mask: T1=%d T2=%d  current T1=%d T2=%d  last T1=%d T2=%d  cold=%d",
-             wake_t1, wake_t2, lvl1, lvl2, s_last_t1, s_last_t2, cold);
+    ESP_LOGI(TAG, "Wake cause=%d ext1=%d mask: T1=%d T2=%d  current T1=%d T2=%d  last T1=%d T2=%d  cold=%d",
+             s_wake_cause, is_ext1_wake, wake_t1, wake_t2, lvl1, lvl2, s_last_t1, s_last_t2, cold);
 
     /* Per-button: report the edge that woke us (press OR release), then current level. */
     if (wake_t1 && !cold) {
@@ -316,15 +325,15 @@ esp_err_t esp_zigbee_setup_commissioning(void)
 
 static void log_wakeup_cause(void)
 {
-    esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+    s_wake_cause = esp_sleep_get_wakeup_cause();
     struct timeval now;
     gettimeofday(&now, NULL);
     int slept_ms = (int)((now.tv_sec - s_sleep_time.tv_sec) * 1000 +
                          (now.tv_usec - s_sleep_time.tv_usec) / 1000);
-    switch (cause) {
+    switch (s_wake_cause) {
     case ESP_SLEEP_WAKEUP_EXT1:  ESP_LOGI(TAG, "Wake: GPIO (slept %d ms)", slept_ms); break;
     case ESP_SLEEP_WAKEUP_TIMER: ESP_LOGI(TAG, "Wake: TIMER (slept %d ms)", slept_ms); break;
-    default:                     ESP_LOGI(TAG, "Wake: POR/RESET (cause %d)", cause); break;
+    default:                     ESP_LOGI(TAG, "Wake: POR/RESET (cause %d)", s_wake_cause); break;
     }
 }
 
