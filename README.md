@@ -64,11 +64,16 @@ Script oder z2m → HA Template Sensor), nicht im ESP-Firmware.
 
 ## Build & Flash
 
-ESP-IDF v5.3.2 + esp-zigbee-sdk benötigt.
+ESP-IDF **v5.5.4** + esp-zigbee-sdk benötigt.
+
+> **Wichtig:** v5.3.2 hat einen Bug, der EXT1 Deep-Sleep Wake mit dem Zigbee
+> Stack auf ESP32-C6 verhindert (ESP wacht nach erstem Sleep nicht mehr durch
+> Tastendruck auf). Mit v5.5.4 funktioniert es. Espressif empfiehlt v5.5.4 als
+> primär getestete Version für esp-zigbee-sdk v2.x.
 
 ```bash
 cd ~/esp/window-sensor
-source ~/esp/esp-idf/export.sh
+source ~/esp/esp-idf-v5.5/export.sh
 idf.py set-target esp32c6
 idf.py build
 idf.py -p /dev/cu.usbmodem1101 flash
